@@ -371,7 +371,7 @@ async function call(body){
   let r;
   try{ r = await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({...body,pw:PW})}).then(x=>x.json()); }
   catch(e){ throw {code:"server_unavailable"}; }
-  if(!r.ok && (r.code==="bad_password"||r.code==="locked"||r.code==="no_password_set")){ PW=null; try{localStorage.removeItem(KEY);}catch(_){} showLogin(MSG[r.code]); await needLogin(); return call(body); }
+  if(!r.ok && (r.code==="bad_password"||r.code==="locked"||r.code==="no_password_set")){ PW=null; try{localStorage.removeItem(KEY);localStorage.removeItem(CK);}catch(_){} showLogin(MSG[r.code]); await needLogin(); return call(body); }
   if(!r.ok) throw {code:r.code||"tool_error",message:r.message};
   return r;
 }
@@ -388,20 +388,26 @@ document.getElementById("lgf").addEventListener("submit",async e=>{e.preventDefa
 // --- чтение: все запросы за 60 мс собираются в один
 let q=[], qt=null;
 function readRange(a1){ return new Promise((res,rej)=>{ q.push({a1,res,rej}); clearTimeout(qt); qt=setTimeout(flush,60); }); }
+// --- память на телефоне: последние данные показываются сразу, свежие догружаются
+const CK="pult_cache";
+function cacheGet(){ try{return JSON.parse(localStorage.getItem(CK)||"{}");}catch(_){return {};} }
+function cachePut(k,v){ try{const c=cacheGet(); c[k]=v; localStorage.setItem(CK,JSON.stringify(c));}catch(_){} }
 async function flush(){ const batch=q; q=[]; const ranges=[...new Set(batch.map(x=>x.a1))];
-  try{ const r=await call({op:"read",ranges}); const now=Date.now();
+  try{ const r=await call({op:"read",ranges}); const now=Date.now(); ranges.forEach(a=>{const v=r.data[a]; if(v&&v.ok) cachePut("r:"+a,{t:now,v:v.values});});
     batch.forEach(x=>{ const v=r.data[x.a1]; if(v&&v.ok) x.res({payload:{ok:true,values:v.values},cache:{storedAt:now}}); else x.rej({code:"tool_error"}); }); }
   catch(e){ batch.forEach(x=>x.rej(e)); } }
 const mcp={
   callTool:(s,t,args)=>readRange(args.range_a1),
   watchTool:(s,t,args,cb,opts)=>{ let alive=true; const run=()=>readRange(args.range_a1).then(r=>alive&&cb({type:"data",result:r}),e=>alive&&cb({type:"error",error:e}));
+    const c=PW&&cacheGet()["r:"+args.range_a1]; if(c) cb({type:"data",result:{payload:{ok:true,values:c.v},cache:{storedAt:c.t}}});
     run(); const iv=setInterval(run,(opts&&opts.refetchInterval)||600000); return ()=>{alive=false;clearInterval(iv);}; }
 };
 // --- база: коллекции items и cash
 const subs={};
-async function reload(c){ const r=await call({op:"list",collection:c}); const snap={docs:r.docs.map(d=>({id:d.id,data:()=>d.data}))}; (subs[c]||[]).forEach(s=>s.cb(snap)); }
+const snapOf=docs=>({docs:docs.map(d=>({id:d.id,data:()=>d.data}))});
+async function reload(c){ const r=await call({op:"list",collection:c}); cachePut("c:"+c,r.docs); const snap=snapOf(r.docs); (subs[c]||[]).forEach(s=>s.cb(snap)); }
 const db={collection:c=>({
-  onSnapshot:(cb,err)=>{ const s={cb,err}; (subs[c]=subs[c]||[]).push(s); reload(c).catch(e=>err&&err(e)); const iv=setInterval(()=>reload(c).catch(()=>{}),60000); return ()=>{clearInterval(iv); subs[c]=subs[c].filter(x=>x!==s);}; },
+  onSnapshot:(cb,err)=>{ const s={cb,err}; (subs[c]=subs[c]||[]).push(s); const cc=PW&&cacheGet()["c:"+c]; if(cc) cb(snapOf(cc)); reload(c).catch(e=>err&&err(e)); const iv=setInterval(()=>reload(c).catch(()=>{}),60000); return ()=>{clearInterval(iv); subs[c]=subs[c].filter(x=>x!==s);}; },
   doc:id=>({
     set:async d=>{ await call({op:"set",collection:c,id,data:d}); reload(c).catch(()=>{}); },
     update:async d=>{ await call({op:"update",collection:c,id,data:d}); reload(c).catch(()=>{}); },
