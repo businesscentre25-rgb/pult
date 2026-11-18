@@ -103,7 +103,12 @@ function del_(c, id) {
 }
 
 // ---------- входящие от Claude: файлы .json в папке INBOX вида {"ops":[{"op":"set|update|delete","collection":"items","id":"...","data":{...}}]}
-function inboxFolder_() { const it = DriveApp.getFoldersByName(INBOX); return it.hasNext() ? it.next() : DriveApp.createFolder(INBOX); }
+const CLAUDE_EMAIL = 'businesscentre25@gmail.com'; // аккаунт Google Drive, подключённый к Claude
+function inboxFolder_() {
+  const it = DriveApp.getFoldersByName(INBOX), f = it.hasNext() ? it.next() : DriveApp.createFolder(INBOX);
+  if (Session.getEffectiveUser().getEmail() !== CLAUDE_EMAIL && !f.getEditors().some(u => u.getEmail() === CLAUDE_EMAIL)) f.addEditor(CLAUDE_EMAIL);
+  return f;
+}
 function applyInbox_() {
   const it = DriveApp.getFoldersByName(INBOX); if (!it.hasNext()) return 0;
   const folder = it.next(), files = [], fi = folder.getFiles();
