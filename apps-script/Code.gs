@@ -7,6 +7,7 @@ const PULT_SHEET = '20_Пульт_база';
 const READ_SHEETS = ['Доставки', '3. Продажи', '5. Опексы', '6. Возвраты', '7. Остатки', '2. SKU'];
 const COLLECTIONS = ['items', 'cash'];
 const MAX_FAILS = 5, LOCK_MIN = 60;
+const INBOX = 'Пульт — входящие от Claude'; // папка в Google Drive: Claude кладёт сюда изменения задач
 const SEED = null; // заполняется только в копии для первого запуска
 
 function doGet() { return out_({ ok: true, app: 'pult' }); }
@@ -20,7 +21,7 @@ function doPost(e) {
     switch (req.op) {
       case 'ping': return out_({ ok: true });
       case 'read': return out_({ ok: true, data: readMany_(req.ranges || []) });
-      case 'list': return out_({ ok: true, docs: list_(req.collection) });
+      case 'list': applyInbox_(); return out_({ ok: true, docs: list_(req.collection) });
       case 'set': write_(req.collection, req.id, req.data, false); return out_({ ok: true });
       case 'update': write_(req.collection, req.id, req.data, true); return out_({ ok: true });
       case 'delete': del_(req.collection, req.id); return out_({ ok: true });
@@ -71,7 +72,8 @@ function readMany_(ranges) {
 function base_() {
   const ss = SpreadsheetApp.getActive();
   let sh = ss.getSheetByName(PULT_SHEET);
-  if (!sh) { sh = ss.insertSheet(PULT_SHEET); sh.getRange(1, 1, 1, 4).setValues([['collection', 'id', 'json', 'updatedAt']]); sh.setFrozenRows(1); }
+  if (!sh) { sh = ss.insertSheet(PULT_SHEET, ss.getNumSheets()); sh.getRange(1, 1, 1, 4).setValues([['collection', 'id', 'json', 'updatedAt']]); sh.setFrozenRows(1); }
+  if (!sh.isSheetHidden()) sh.hideSheet();
   return sh;
 }
 function rows_(sh) { const n = sh.getLastRow(); return n < 2 ? [] : sh.getRange(2, 1, n - 1, 4).getValues(); }
@@ -98,9 +100,29 @@ function del_(c, id) {
   finally { lock.releaseLock(); }
 }
 
+// ---------- входящие от Claude: файлы .json в папке INBOX вида {"ops":[{"op":"set|update|delete","collection":"items","id":"...","data":{...}}]}
+function inboxFolder_() { const it = DriveApp.getFoldersByName(INBOX); return it.hasNext() ? it.next() : DriveApp.createFolder(INBOX); }
+function applyInbox_() {
+  const it = DriveApp.getFoldersByName(INBOX); if (!it.hasNext()) return 0;
+  const files = [], fi = it.next().getFiles();
+  while (fi.hasNext()) files.push(fi.next());
+  files.sort((a, b) => a.getDateCreated() - b.getDateCreated());
+  let n = 0;
+  files.filter(f => f.getName().indexOf('ОШИБКА') !== 0).forEach(f => {
+    try {
+      const j = JSON.parse(f.getBlob().getDataAsString());
+      (j.ops || []).forEach(o => { if (o.op === 'delete') del_(o.collection, o.id); else write_(o.collection, o.id, o.data, o.op === 'update'); n++; });
+      f.setTrashed(true);
+    } catch (err) { f.setName('ОШИБКА — ' + f.getName()); }
+  });
+  return n;
+}
+function inboxTick() { applyInbox_(); }
+
 /** Запустить один раз вручную: создаёт лист базы и переносит задачи и счета из пульта в Claude. */
 function setup() {
-  base_();
+  base_(); inboxFolder_();
+  if (!ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === 'inboxTick')) ScriptApp.newTrigger('inboxTick').timeBased().everyMinutes(10).create();
   if (!SEED) { Logger.log('Лист готов. Данных для переноса нет.'); return; }
   let n = 0;
   Object.keys(SEED).forEach(c => SEED[c].forEach(doc => { write_(c, doc.id, doc.data, false); n++; }));
