@@ -1,0 +1,78 @@
+<style>
+#lg{position:fixed;inset:0;z-index:999;background:var(--bg0);display:flex;align-items:center;justify-content:center;padding:24px}
+#lg .box{width:100%;max-width:340px;display:flex;flex-direction:column;gap:14px;text-align:center}
+#lg img{width:72px;height:72px;border-radius:16px;margin:0 auto}
+#lg h1{font-size:20px;margin:0}
+#lg input{font:inherit;font-size:17px;padding:14px;border-radius:12px;border:1px solid var(--line2);background:var(--card);color:var(--text);text-align:center}
+#lg button{padding:14px;border-radius:12px;background:var(--gold);color:#120f13;font-weight:700;font-size:16px}
+#lg button:disabled{opacity:.5}
+#lg .er{color:var(--bad);min-height:20px;font-size:13px}
+body{padding-top:env(safe-area-inset-top)}
+</style>
+<div id="lg" class="hidden"><form class="box" id="lgf" autocomplete="on">
+<img src="icon-180.png" alt="">
+<h1>Пульт AI-штаба</h1>
+<input id="lgp" type="password" name="password" autocomplete="current-password" placeholder="Пароль" required>
+<button id="lgb" type="submit">Войти</button>
+<div class="er" id="lge"></div>
+</form></div>
+<script>
+// ===== Связь с таблицей через Google Apps Script (замена Claude: mcp + db)
+(function(){
+const API = "__API_URL__";
+const KEY = "pult_pw";
+let PW = null; try{PW=localStorage.getItem(KEY);}catch(_){}
+let waitLogin = [];
+const MSG={bad_password:"Неверный пароль",locked:"Слишком много попыток. Вход закрыт на 1 час",no_password_set:"Пароль не задан в Apps Script"};
+async function call(body){
+  if(!PW) await needLogin();
+  let r;
+  try{ r = await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({...body,pw:PW})}).then(x=>x.json()); }
+  catch(e){ throw {code:"server_unavailable"}; }
+  if(!r.ok && (r.code==="bad_password"||r.code==="locked"||r.code==="no_password_set")){ PW=null; try{localStorage.removeItem(KEY);localStorage.removeItem(CK);}catch(_){} showLogin(MSG[r.code]); await needLogin(); return call(body); }
+  if(!r.ok) throw {code:r.code||"tool_error",message:r.message};
+  return r;
+}
+function needLogin(){ return new Promise(res=>{waitLogin.push(res); showLogin();}); }
+function showLogin(err){ document.getElementById("lg").classList.remove("hidden"); if(err)document.getElementById("lge").textContent=err; setTimeout(()=>document.getElementById("lgp").focus(),50); }
+document.getElementById("lgf").addEventListener("submit",async e=>{e.preventDefault();
+  const b=document.getElementById("lgb"),p=document.getElementById("lgp").value; b.disabled=true; document.getElementById("lge").textContent="Проверяю…";
+  try{ const r=await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({op:"ping",pw:p})}).then(x=>x.json());
+    if(r.ok){ PW=p; try{localStorage.setItem(KEY,p);}catch(_){} document.getElementById("lg").classList.add("hidden"); document.getElementById("lge").textContent=""; const w=waitLogin; waitLogin=[]; w.forEach(f=>f()); }
+    else document.getElementById("lge").textContent=MSG[r.code]||"Ошибка входа";
+  }catch(_){ document.getElementById("lge").textContent="Нет связи с таблицей. Проверь интернет"; }
+  b.disabled=false; });
+
+// --- чтение: все запросы за 60 мс собираются в один
+let q=[], qt=null;
+function readRange(a1){ return new Promise((res,rej)=>{ q.push({a1,res,rej}); clearTimeout(qt); qt=setTimeout(flush,60); }); }
+// --- память на телефоне: последние данные показываются сразу, свежие догружаются
+const CK="pult_cache";
+function cacheGet(){ try{return JSON.parse(localStorage.getItem(CK)||"{}");}catch(_){return {};} }
+function cachePut(k,v){ try{const c=cacheGet(); c[k]=v; localStorage.setItem(CK,JSON.stringify(c));}catch(_){} }
+async function flush(){ const batch=q; q=[]; const ranges=[...new Set(batch.map(x=>x.a1))];
+  try{ const r=await call({op:"read",ranges}); const now=Date.now(); ranges.forEach(a=>{const v=r.data[a]; if(v&&v.ok) cachePut("r:"+a,{t:now,v:v.values});});
+    batch.forEach(x=>{ const v=r.data[x.a1]; if(v&&v.ok) x.res({payload:{ok:true,values:v.values},cache:{storedAt:now}}); else x.rej({code:"tool_error"}); }); }
+  catch(e){ batch.forEach(x=>x.rej(e)); } }
+const mcp={
+  callTool:(s,t,args)=>readRange(args.range_a1),
+  watchTool:(s,t,args,cb,opts)=>{ let alive=true; const run=()=>readRange(args.range_a1).then(r=>alive&&cb({type:"data",result:r}),e=>alive&&cb({type:"error",error:e}));
+    const c=PW&&cacheGet()["r:"+args.range_a1]; if(c) cb({type:"data",result:{payload:{ok:true,values:c.v},cache:{storedAt:c.t}}});
+    run(); const iv=setInterval(run,(opts&&opts.refetchInterval)||600000); return ()=>{alive=false;clearInterval(iv);}; }
+};
+// --- база: коллекции items и cash
+const subs={};
+const snapOf=docs=>({docs:docs.map(d=>({id:d.id,data:()=>d.data}))});
+async function reload(c){ const r=await call({op:"list",collection:c}); cachePut("c:"+c,r.docs); const snap=snapOf(r.docs); (subs[c]||[]).forEach(s=>s.cb(snap)); }
+const db={collection:c=>({
+  onSnapshot:(cb,err)=>{ const s={cb,err}; (subs[c]=subs[c]||[]).push(s); const cc=PW&&cacheGet()["c:"+c]; if(cc) cb(snapOf(cc)); reload(c).catch(e=>err&&err(e)); const iv=setInterval(()=>reload(c).catch(()=>{}),60000); return ()=>{clearInterval(iv); subs[c]=subs[c].filter(x=>x!==s);}; },
+  doc:id=>({
+    set:async d=>{ await call({op:"set",collection:c,id,data:d}); reload(c).catch(()=>{}); },
+    update:async d=>{ await call({op:"update",collection:c,id,data:d}); reload(c).catch(()=>{}); },
+    delete:async()=>{ await call({op:"delete",collection:c,id}); reload(c).catch(()=>{}); }
+  })
+})};
+window.claude={use:async k=>k==="mcp"?mcp:k==="db"?db:null};
+document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible"&&document.getElementById("refresh")) document.getElementById("refresh").click(); });
+})();
+</script>
