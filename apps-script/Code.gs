@@ -1,9 +1,11 @@
 /**
- * Пульт AI-штаба — серверная часть (Google Apps Script, привязан к таблице Uchet_UA_AI_SHTAB_FINAL).
+ * Пульт AI-штаба — серверная часть. ОТДЕЛЬНЫЙ проект Apps Script (не внутри таблицы), открывает таблицу по ID.
  * Пароль хранится в «Свойствах скрипта»: PULT_PASSWORD. В коде пароля нет.
  * Данные пульта (задачи, счета) — лист PULT_SHEET. Остальные листы — только чтение.
  */
+const SHEET_ID = '1NIoFb1pGeF25zf1jMWZORc8lFXv5ALdJbn2MdrBGHQA'; // Uchet_UA_AI_SHTAB_FINAL
 const PULT_SHEET = '20_Пульт_база';
+function ss_() { return SpreadsheetApp.openById(SHEET_ID); }
 const READ_SHEETS = ['Доставки', '3. Продажи', '5. Опексы', '6. Возвраты', '7. Остатки', '2. SKU'];
 const COLLECTIONS = ['items', 'cash'];
 const MAX_FAILS = 5, LOCK_MIN = 60;
@@ -50,7 +52,7 @@ function checkPw_(pw) {
 
 // ---------- чтение таблицы (формат как у коннектора: числа — числами, даты — как в таблице)
 function readMany_(ranges) {
-  const ss = SpreadsheetApp.getActive(), res = {};
+  const ss = ss_(), res = {};
   ranges.slice(0, 20).forEach(a1 => {
     const m = /^'?(.+?)'?!([A-Z]+\d+:[A-Z]+\d+)$/.exec(String(a1));
     if (!m || READ_SHEETS.indexOf(m[1]) < 0) { res[a1] = { ok: false, code: 'not_allowed' }; return; }
@@ -70,7 +72,7 @@ function readMany_(ranges) {
 
 // ---------- база пульта: лист PULT_SHEET, столбцы: collection | id | json | updatedAt
 function base_() {
-  const ss = SpreadsheetApp.getActive();
+  const ss = ss_();
   let sh = ss.getSheetByName(PULT_SHEET);
   if (!sh) { sh = ss.insertSheet(PULT_SHEET, ss.getNumSheets()); sh.getRange(1, 1, 1, 4).setValues([['collection', 'id', 'json', 'updatedAt']]); sh.setFrozenRows(1); }
   if (!sh.isSheetHidden()) sh.hideSheet();
@@ -104,7 +106,7 @@ function del_(c, id) {
 function inboxFolder_() { const it = DriveApp.getFoldersByName(INBOX); return it.hasNext() ? it.next() : DriveApp.createFolder(INBOX); }
 function applyInbox_() {
   const it = DriveApp.getFoldersByName(INBOX); if (!it.hasNext()) return 0;
-  const files = [], fi = it.next().getFiles();
+  const folder = it.next(), files = [], fi = folder.getFiles();
   while (fi.hasNext()) files.push(fi.next());
   files.sort((a, b) => a.getDateCreated() - b.getDateCreated());
   let n = 0;
@@ -112,7 +114,7 @@ function applyInbox_() {
     try {
       const j = JSON.parse(f.getBlob().getDataAsString());
       (j.ops || []).forEach(o => { if (o.op === 'delete') del_(o.collection, o.id); else write_(o.collection, o.id, o.data, o.op === 'update'); n++; });
-      f.setTrashed(true);
+      try { f.setTrashed(true); } catch (_) { folder.removeFile(f); }
     } catch (err) { f.setName('ОШИБКА — ' + f.getName()); }
   });
   return n;
